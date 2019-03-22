@@ -17,16 +17,99 @@
 extern crate exonum_testkit;
 extern crate integration_tests;
 extern crate java_bindings;
+#[macro_use]
+extern crate lazy_static;
+extern crate parking_lot;
 
 use exonum_testkit::TestKitBuilder;
+use integration_tests::fake_service::*;
 use integration_tests::vm::{get_fake_service_artifact_path, get_fakes_classpath, get_libpath};
-use java_bindings::{Config, JavaServiceRuntime, JvmConfig, RuntimeConfig};
+use java_bindings::{Config, JavaServiceRuntime, JvmConfig, MainExecutor, RuntimeConfig};
+use parking_lot::{Mutex, MutexGuard};
+
+lazy_static! {
+    // Reference to the JavaServiceRuntime is wrapped with Mutex in order to execute tests (more
+    // precise - Java code for artifacts loading and services creation) sequentially.
+    // We use Mutex from the `parking_lot` crate because it doesn't get poisoned in case of panic.
+    static ref SERVICE_RUNTIME: Mutex<JavaServiceRuntime> = Mutex::new(create_runtime());
+}
 
 #[test]
-// TODO: reenable this test after ECR-2789
-//#[cfg_attr(target_os = "linux", ignore)]
-fn bootstrap() {
-    let artifact_path = get_fake_service_artifact_path();
+fn load_one_service() {
+    let runtime = get_runtime();
+    let artifact_path = create_service_artifact_valid(runtime.get_executor());
+    dbg!(&artifact_path);
+    let artifact_id = runtime.load_artifact(&artifact_path);
+    let service = runtime.create_service(&artifact_id);
+
+    let mut testkit = TestKitBuilder::validator().with_service(service).create();
+
+    testkit.create_block();
+}
+
+#[test]
+fn load_two_services() {
+    let runtime = get_runtime();
+
+    let fake_artifact_path = get_fake_service_artifact_path();
+    let fake_artifact_id = runtime.load_artifact(&fake_artifact_path);
+    let fake_service = runtime.create_service(&fake_artifact_id);
+
+    let valid_artifact_path = create_service_artifact_valid(runtime.get_executor());
+    let valid_artifact_id = runtime.load_artifact(&valid_artifact_path);
+    let valid_service = runtime.create_service(&valid_artifact_id);
+
+    let mut testkit = TestKitBuilder::validator()
+        .with_service(fake_service)
+        .with_service(valid_service)
+        .create();
+
+    testkit.create_block();
+}
+
+#[test]
+#[should_panic(expected = "Unable to load artifact")]
+fn nonexistent_artifact() {
+    let runtime = get_runtime();
+    let artifact_path = "/nonexistent/artifact.jar";
+    runtime.load_artifact(&artifact_path);
+}
+
+#[test]
+#[should_panic(expected = "Unable to load artifact")]
+fn load_artifact_twice() {
+    let runtime = get_runtime();
+    let artifact_path = create_service_artifact_valid(runtime.get_executor());
+
+    runtime.load_artifact(&artifact_path);
+    runtime.load_artifact(&artifact_path);
+}
+
+#[test]
+#[should_panic(expected = "Unable to load artifact")]
+fn load_failing_artifact() {
+    let runtime = get_runtime();
+    let artifact_path = create_service_artifact_non_loadable(runtime.get_executor());
+    runtime.load_artifact(&artifact_path);
+}
+
+#[test]
+#[should_panic(expected = "Unable to create service for artifact_id")]
+fn non_instantiable_service() {
+    let runtime = get_runtime();
+    let artifact_path = create_service_artifact_non_instantiable_service(runtime.get_executor());
+    let artifact_id = runtime.load_artifact(&artifact_path);
+    runtime.create_service(&artifact_id);
+}
+
+#[test]
+#[should_panic(expected = "Unable to create service for artifact_id")]
+fn create_service_for_unknown_artifact() {
+    let runtime = get_runtime();
+    runtime.create_service("unknown:artifact:id");
+}
+
+fn create_runtime() -> JavaServiceRuntime {
     let system_class_path = get_fakes_classpath();
     let system_lib_path = get_libpath();
     let log_config_path = "".to_owned();
@@ -49,16 +132,9 @@ fn bootstrap() {
         runtime_config,
     };
 
-    let service_runtime = JavaServiceRuntime::new(config);
+    JavaServiceRuntime::new(config)
+}
 
-    let artifact_id = service_runtime
-        .load_artifact(&artifact_path)
-        .expect("Unable to load artifact");
-    let service = service_runtime
-        .create_service(&artifact_id)
-        .expect("Unable to create service");
-
-    let mut testkit = TestKitBuilder::validator().with_service(service).create();
-
-    testkit.create_block();
+fn get_runtime() -> MutexGuard<'static, JavaServiceRuntime> {
+    SERVICE_RUNTIME.lock()
 }
