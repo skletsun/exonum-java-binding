@@ -86,7 +86,7 @@ impl ServiceFactory for JavaServiceFactoryAdapter {
             // This callback gets called for every instance of ServiceFactory, but we have to do 
             // this extension only once otherwise the underlying `clap` backend will complain about
             // non-unique argument names
-            extend_command_once()
+            return extend_command_once();
         }
         None
     }
